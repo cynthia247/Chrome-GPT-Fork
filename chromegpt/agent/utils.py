@@ -1,14 +1,16 @@
 from typing import List
 
 from langchain.agents import Tool
-from langchain.docstore import InMemoryDocstore
-from langchain.embeddings import OpenAIEmbeddings
 from langchain.tools.base import BaseTool
-from langchain.vectorstores import FAISS
+from langchain_community.docstore.in_memory import InMemoryDocstore
+from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
 
 from chromegpt.tools.selenium import (
     ClickButtonInput,
+    CypressTestInput,
     DescribeWebsiteInput,
+    ElementSelectorsInput,
     FillOutFormInput,
     FindFormInput,
     GoogleSearchInput,
@@ -64,6 +66,33 @@ def get_agent_tools() -> List[BaseTool]:
             func=selenium.google_search,
             description="perform a google search",
             args_schema=GoogleSearchInput,
+        ),
+        Tool(
+            name="get_element_selectors",
+            func=selenium.get_element_selectors,
+            description=(
+                "Extract CSS selectors and XPath for web elements by text content. "
+                "Useful for identifying elements for test automation and debugging."
+            ),
+            args_schema=ElementSelectorsInput,
+        ),
+        Tool(
+            name="generate_cypress_test",
+            func=selenium.generate_cypress_test,
+            description=(
+                "Generate a complete Cypress test script based on the current webpage. "
+                "Creates tests for interactive elements found on the page."
+            ),
+            args_schema=CypressTestInput,
+        ),
+        Tool(
+            name="extract_page_elements",
+            func=selenium.extract_page_elements_for_testing,
+            description=(
+                "Extract comprehensive information about all testable elements "
+                "on the current page. Returns detailed element data including "
+                "selectors for test automation."
+            ),
         ),
         # TODO: Re-enable this, StopIteration error, cannot parse None as input
         # Tool(

@@ -44,6 +44,14 @@ class SeleniumWrapper:
             chrome_options.add_argument("--headless")
         else:
             chrome_options.add_argument("--start-maximized")
+        
+        # Add options for CI environments
+        if not docker:
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--disable-extensions")
+        
         if docker:
             self.driver = webdriver.Remote(
                 "http://selenium-chrome:4444/wd/hub",
@@ -253,7 +261,7 @@ class SeleniumWrapper:
     def fill_out_form(self, form_input: Optional[str] = None, **kwargs: Any) -> str:
         """fill out form by form field name and input name"""
         filled_element = None
-        if form_input and type(form_input) == str:
+        if form_input and isinstance(form_input, str):
             # Clean up form input
             form_input_str = truncate_string_from_last_occurrence(
                 string=form_input, character="}"  # type: ignore
@@ -375,6 +383,270 @@ class SeleniumWrapper:
             interactable_output += f"Click on these buttons: {json.dumps(buttons_text)}"
         return interactable_output
 
+    def get_element_selectors(self, element_text: str) -> str:
+        """Get CSS selectors and XPath for an element by text content."""
+        try:
+            elements = self.driver.find_elements(
+                By.XPATH,
+                "//button | //div[@role='button'] | //a | //input | "
+                "//textarea | //select",
+            )
+            
+            for element in elements:
+                text = find_parent_element_text(element)
+                if (
+                    element.is_displayed()
+                    and element.is_enabled()
+                    and element_text.lower() in text.lower()
+                ):
+                    # Get various selector options
+                    element_info = {
+                        "text": text,
+                        "tag_name": element.tag_name,
+                        "id": element.get_attribute("id") or "",
+                        "class": element.get_attribute("class") or "",
+                        "name": element.get_attribute("name") or "",
+                        "type": element.get_attribute("type") or "",
+                        "role": element.get_attribute("role") or "",
+                        "aria_label": element.get_attribute("aria-label") or "",
+                    }
+                    
+                    # Generate CSS selectors
+                    css_selectors = []
+                    xpath_selectors = []
+                    
+                    # ID selector (most reliable)
+                    if element_info["id"]:
+                        css_selectors.append(f"#{element_info['id']}")
+                        xpath_selectors.append(f"//*[@id='{element_info['id']}']")
+                    
+                    # Class selector
+                    if element_info["class"]:
+                        classes = element_info["class"].split()
+                        if classes:
+                            css_selectors.append(f".{'.'.join(classes)}")
+                    
+                    # Name attribute
+                    if element_info["name"]:
+                        css_selectors.append(f"[name='{element_info['name']}']")
+                        xpath_selectors.append(f"//*[@name='{element_info['name']}']")
+                    
+                    # Text-based XPath
+                    if text:
+                        text_short = text[:30]
+                        tag_name = element_info['tag_name']
+                        xpath_selectors.append(
+                            f"//{tag_name}[contains(text(), '{text_short}')]"
+                        )
+                        xpath_selectors.append(f"//*[contains(text(), '{text_short}')]")
+                    
+                    # Type-specific selectors
+                    if element_info["type"]:
+                        css_selectors.append(f"input[type='{element_info['type']}']")
+                    
+                    # Role-based
+                    if element_info["role"]:
+                        css_selectors.append(f"[role='{element_info['role']}']")
+                        xpath_selectors.append(f"//*[@role='{element_info['role']}']")
+                    
+                    return json.dumps({
+                        "element_info": element_info,
+                        "css_selectors": css_selectors,
+                        "xpath_selectors": xpath_selectors,
+                        "recommended_css": css_selectors[0] if css_selectors else None,
+                        "recommended_xpath": (
+                            xpath_selectors[0] if xpath_selectors else None
+                        )
+                    }, indent=2)
+            
+            return f"No element found matching text: '{element_text}'"
+            
+        except WebDriverException as e:
+            return f"Error finding element selectors: {e.msg}"
+
+    def generate_cypress_test(
+        self, test_name: str = "Generated Test", base_url: Optional[str] = None
+    ) -> str:
+        """Generate a Cypress test based on the current page and available elements."""
+        current_url = self.driver.current_url
+        if base_url is None:
+            base_url = current_url
+            
+        # Get all interactable elements with detailed information
+        elements = self.driver.find_elements(
+            By.XPATH,
+            "//button | //div[@role='button'] | //a | //input | //textarea | //select",
+        )
+        
+        element_data = []
+        for element in elements:
+            if element.is_displayed() and element.is_enabled():
+                text = find_parent_element_text(element)
+                if text and len(text.strip()) > 0:
+                    element_info = {
+                        "text": text[:50],
+                        "tag": element.tag_name,
+                        "id": element.get_attribute("id") or "",
+                        "class": element.get_attribute("class") or "",
+                        "name": element.get_attribute("name") or "",
+                        "type": element.get_attribute("type") or "",
+                        "role": element.get_attribute("role") or "",
+                    }
+                    
+                    # Generate selector for Cypress
+                    selector = None
+                    if element_info["id"]:
+                        selector = f"#{element_info['id']}"
+                    elif element_info["name"]:
+                        selector = f"[name='{element_info['name']}']"
+                    elif element_info["role"]:
+                        selector = f"[role='{element_info['role']}']"
+                    elif element_info["class"]:
+                        classes = element_info["class"].split()
+                        if classes:
+                            selector = f".{classes[0]}"
+                    
+                    if selector:
+                        element_info["selector"] = selector
+                        element_data.append(element_info)
+        
+        # Generate Cypress test code
+        cypress_test = f'''describe('{test_name}', () => {{
+  beforeEach(() => {{
+    cy.visit('{current_url}')
+  }})
+
+  it('should load the page successfully', () => {{
+    cy.url().should('contain', '{current_url.split("://")[1].split("/")[0]}')
+    cy.title().should('not.be.empty')
+  }})
+
+  // Available interactive elements for testing:
+'''
+        
+        for i, element in enumerate(element_data[:10], 1):  # Limit to first 10 elements
+            cypress_test += f'''
+  it('should interact with element {i}: {element["text"][:30]}', () => {{
+    // Element: {element["tag"]} - "{element["text"]}"
+    // Selector: {element["selector"]}
+    
+    cy.get('{element["selector"]}').should('be.visible')
+    
+    // Uncomment based on element type:
+    '''
+            
+            if element["tag"] in ["button", "a"] or element["role"] == "button":
+                cypress_test += f'''// cy.get('{element["selector"]}').click()
+    '''
+            elif element["tag"] in ["input", "textarea"]:
+                if element["type"] in ["text", "email", "password", ""]:
+                    cypress_test += (
+                        f"// cy.get('{element['selector']}').type('test input')\n"
+                    )
+                elif element["type"] == "checkbox":
+                    cypress_test += (
+                        f"// cy.get('{element['selector']}').check()\n"
+                    )
+            elif element["tag"] == "select":
+                cypress_test += (
+                    f"// cy.get('{element['selector']}').select('option-value')\n"
+                )
+            
+            cypress_test += "  })\n"
+        
+        cypress_test += '''
+  // Form filling example (customize as needed):
+  it('should fill out forms', () => {
+    // Add your form interaction tests here
+    // Example:
+    // cy.get('[name="email"]').type('test@example.com')
+    // cy.get('[name="password"]').type('password123')
+    // cy.get('button[type="submit"]').click()
+  })
+})'''
+        
+        return cypress_test
+
+    def extract_page_elements_for_testing(self) -> str:
+        """Extract comprehensive information about page elements for test automation."""
+        try:
+            # Get page information
+            page_info = {
+                "url": self.driver.current_url,
+                "title": self.driver.title,
+                "elements": []
+            }
+            
+            # Find all potentially testable elements
+            all_elements = self.driver.find_elements(By.XPATH, "//*")
+            
+            testable_elements = []
+            for element in all_elements:
+                if (element.is_displayed() and 
+                    element.tag_name in [
+                        "button", "a", "input", "textarea", "select", "div", "span"
+                    ] and
+                    (element.get_attribute("onclick") or 
+                     element.get_attribute("role") in ["button", "link"] or
+                     element.tag_name in [
+                         "button", "a", "input", "textarea", "select"
+                     ])):
+                    
+                    parent_text = find_parent_element_text(element)
+                    element_data = {
+                        "tag": element.tag_name,
+                        "text": parent_text[:100] if parent_text else "",
+                        "id": element.get_attribute("id") or "",
+                        "class": element.get_attribute("class") or "",
+                        "name": element.get_attribute("name") or "",
+                        "type": element.get_attribute("type") or "",
+                        "role": element.get_attribute("role") or "",
+                        "href": element.get_attribute("href") or "",
+                        "onclick": bool(element.get_attribute("onclick")),
+                        "location": element.location,
+                        "size": element.size
+                    }
+                    
+                    # Generate multiple selector options
+                    selectors = []
+                    if element_data["id"]:
+                        selectors.append({
+                            "type": "id",
+                            "selector": f"#{element_data['id']}",
+                            "reliability": "high"
+                        })
+                    if element_data["name"]:
+                        selectors.append({
+                            "type": "name",
+                            "selector": f"[name='{element_data['name']}']",
+                            "reliability": "high"
+                        })
+                    if element_data["class"]:
+                        # Use first 2 classes
+                        classes = element_data["class"].split()[:2]
+                        if classes:
+                            selectors.append({
+                                "type": "class",
+                                "selector": f".{'.'.join(classes)}",
+                                "reliability": "medium"
+                            })
+                    if element_data["text"]:
+                        selectors.append({
+                            "type": "text",
+                            "selector": f":contains('{element_data['text'][:20]}')",
+                            "reliability": "medium"
+                        })
+                    
+                    element_data["selectors"] = selectors
+                    testable_elements.append(element_data)
+            
+            page_info["elements"] = testable_elements[:20]  # Limit to first 20 elements
+            
+            return json.dumps(page_info, indent=2)
+            
+        except WebDriverException as e:
+            return f"Error extracting page elements: {e.msg}"
+
 
 class GoogleSearchInput(BaseModel):
     """Google search input model."""
@@ -427,4 +699,29 @@ class ScrollInput(BaseModel):
 
     direction: str = Field(
         default="down", description="direction to scroll, either 'up' or 'down'"
+    )
+
+
+class ElementSelectorsInput(BaseModel):
+    """Get element selectors input model."""
+
+    element_text: str = Field(
+        ...,
+        description="text content of the element to find selectors for",
+        example="Login"
+    )
+
+
+class CypressTestInput(BaseModel):
+    """Generate Cypress test input model."""
+
+    test_name: str = Field(
+        default="Generated Test",
+        description="name for the generated test",
+        example="User Login Flow"
+    )
+    base_url: Optional[str] = Field(
+        default=None,
+        description="base URL for the test (uses current URL if not provided)",
+        example="https://example.com"
     )
